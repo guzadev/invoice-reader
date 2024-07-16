@@ -21,3 +21,4 @@ Puedes instalar las bibliotecas adicionales usando pip:
 ```bash
 pip install pdfplumber matplotlib
 
+# invoice-reader

@@ -6,6 +6,7 @@ import os
 import matplotlib.pyplot as plt
 from datetime import datetime
 
+
 # Mapa de traducción de meses en español a inglés
 MONTH_TRANSLATION = {
     "ENERO": "January",
@@ -22,12 +23,14 @@ MONTH_TRANSLATION = {
     "DICIEMBRE": "December"
 }
 
+
 # Convertir los valores de los saldo a flotantes
 def convert_to_float(value):
     try:
         return float(round(Decimal(value.replace('.', '').replace(',', '.')), 2))
     except InvalidOperation:
         return None
+
 
 # Abrir factura
 def extract_text_from_pdf(pdf_file_path):
@@ -50,7 +53,8 @@ def extract_text_from_pdf(pdf_file_path):
         print(f'Error processing the file {pdf_file_path}: {e}')
         return None
 
-        
+
+# Extraer informacion de la factura con expresiones regulares        
 def extract_invoice_info(text):
     # Patrones de expresiones regulares
     mes_actual_pattern = r"\b([A-Z]+-[\d]{2})\b"
@@ -80,7 +84,7 @@ def extract_invoice_info(text):
         cuotas_line = cuotas_match.group(2)
 
         # Capturar los meses
-        meses_pattern = r"([A-Z]+[\d]{2}-)"
+        meses_pattern = r"([A-Z]+-[\d]{2})"
         meses = re.findall(meses_pattern, meses_line)
 
         # Capturar los valores de las cuotas
@@ -88,15 +92,15 @@ def extract_invoice_info(text):
         cuotas = re.findall(cuotas_pattern, cuotas_line)
         
         # Convertir los valores de las cuotas a float
-        cuotas = [convert_to_float(cuota) for cuota in cuotas]
-        meses = [mes.capitalize() for mes in meses]
+        monto_cuota = [convert_to_float(cuota) for cuota in cuotas]
+        mes_cuota = [mes.capitalize() for mes in meses]
         # Asociar meses y cuotas
-        cuotas_a_vencer = dict(zip(meses, cuotas))
+        cuotas_a_vencer = dict(zip(mes_cuota, monto_cuota))
+        cuotas_factura_actual = {mes_actual: cuotas_a_vencer}
     else:
         cuotas_a_vencer = {}
 
-        
-    return saldos, cuotas_a_vencer
+    return saldos, cuotas_factura_actual 
 
 
 # Iniciar base de datos con sus tablas
@@ -114,9 +118,10 @@ def database():
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS cuotas (
-        mes TEXT,
-        cuota REAL,
-        PRIMARY KEY (mes, cuota)
+        mes_factura TEXT,
+        mes_cuota TEXT,
+        monto_cuota REAL,
+        PRIMARY KEY (mes_factura, mes_cuota)
     )
     ''')
 
@@ -130,7 +135,8 @@ def database():
     conn.close()
 
 
-def insert_data(saldos, cuotas_a_vencer, archivo):
+# Ingreso de datos a la base de datos
+def insert_data(saldos, cuotas_factura_actual, archivo):
     conn = sqlite3.connect('invoices.db')
     cursor = conn.cursor()
 
@@ -149,26 +155,26 @@ def insert_data(saldos, cuotas_a_vencer, archivo):
                 VALUES (?, ?, ?)
                 ''', (mes, saldo['pesos'], saldo['dolares']))
 
-    for mes, cuota in cuotas_a_vencer.items():
-        cursor.execute('SELECT mes, cuota FROM cuotas WHERE mes = ? AND cuota = ?', (mes, cuota))
-        if cursor.fetchone():
-            cursor.execute('''
-            UPDATE cuotas
-            SET cuota = ?
-            WHERE mes = ? AND cuota = ?
-            ''', (cuota, mes, cuota))
-        else:
-            cursor.execute('''
-            INSERT INTO cuotas (mes, cuota)
-            VALUES (?, ?)
-            ''', (mes, cuota))
+    for mes_factura, cuotas in cuotas_factura_actual.items():
+        for mes_cuota, monto_cuota in cuotas.items():
+            cursor.execute('SELECT mes_factura, mes_cuota FROM cuotas WHERE mes_factura = ? AND mes_cuota = ?', (mes_factura, mes_cuota))
+            if cursor.fetchone():
+                cursor.execute('''
+                UPDATE cuotas
+                SET monto_cuota = ?
+                WHERE mes_factura = ? AND mes_cuota = ?
+                ''', (monto_cuota, mes_factura, mes_cuota))
+            else:
+                cursor.execute('''
+                INSERT INTO cuotas (mes_factura, mes_cuota, monto_cuota)
+                VALUES (?, ?, ?)
+                ''', (mes_factura, mes_cuota, monto_cuota))
 
     # Marcar el archivo como procesado
     cursor.execute('INSERT INTO procesados (archivo) VALUES (?)', (archivo,))
 
     conn.commit()
     conn.close()
-
 
 
 # Verificación de los datos cargados
@@ -186,7 +192,7 @@ def verify_data():
     for row in cursor.fetchall():
         print(row)
 
-
+# Graficos
 def plot_data(save_path=None):
     conn = sqlite3.connect('invoices.db')
     cursor = conn.cursor()
@@ -194,7 +200,7 @@ def plot_data(save_path=None):
     cursor.execute('SELECT mes, saldo_pesos, saldo_dolares FROM saldos')
     saldos = cursor.fetchall()
 
-    cursor.execute('SELECT mes, cuota FROM cuotas')
+    cursor.execute('SELECT mes_factura, mes_cuota, monto_cuota FROM cuotas')
     cuotas = cursor.fetchall()
 
     conn.close()
@@ -206,7 +212,7 @@ def plot_data(save_path=None):
         return datetime.strptime(f"{mes_english}-{year}", '%B-%y')
 
     saldos.sort(key=lambda x: translate_month(x[0]))
-    cuotas.sort(key=lambda x: translate_month(x[0]))
+    cuotas.sort(key=lambda x: translate_month(x[1]))
 
     meses = [row[0] for row in saldos]
     saldo_pesos = [row[1] for row in saldos]
@@ -215,6 +221,17 @@ def plot_data(save_path=None):
     # Filtrar los meses que tienen saldo en dólares
     meses_dolares = [mes for mes, saldo in zip(meses, saldo_dolares) if saldo != 0]
     saldo_dolares_filtrado = [saldo for saldo in saldo_dolares if saldo != 0]
+
+    # Filtrar las cuotas de la factura más reciente
+    if cuotas:
+        cuotas.sort(key=lambda x: translate_month(x[0]), reverse=True)
+        mes_factura_reciente = cuotas[0][0]
+        cuotas_recientes = [monto_cuota for mes_factura, mes_cuota, monto_cuota in cuotas if mes_factura == mes_factura_reciente]
+        meses_cuotas_recientes = [mes_cuota for mes_factura, mes_cuota, monto_cuota in cuotas if mes_factura == mes_factura_reciente]
+    else:
+        mes_factura_reciente = "No encontrado"
+        cuotas_recientes = []
+        meses_cuotas_recientes = []
 
     fig, axs = plt.subplots(3, 1, figsize=(10, 12), constrained_layout=True)
 
@@ -230,7 +247,9 @@ def plot_data(save_path=None):
         horizontal_offset = 0  # Asegurar que las anotaciones estén centradas horizontalmente
         if i > 0 and saldo_pesos[i] < saldo_pesos[i-1]:
             vertical_offset = 10  # Ajustar posición para valores decrecientes
-        axs[0].annotate(f'{txt:.2f}', (meses[i], saldo_pesos[i]), textcoords="offset points", xytext=(horizontal_offset, vertical_offset), ha='center')
+        axs[0].annotate(f'{txt:.2f}', (meses[i], saldo_pesos[i]), 
+                        textcoords="offset points", xytext=(horizontal_offset, vertical_offset), 
+                        ha='center', color='white', bbox=dict(facecolor='black', alpha=0.7, edgecolor='none'))
 
     # Gráfico de Saldos en Dólares (solo si hay datos)
     if meses_dolares:
@@ -245,29 +264,31 @@ def plot_data(save_path=None):
             horizontal_offset = 0  # Asegurar que las anotaciones estén centradas horizontalmente
             if i > 0 and saldo_dolares_filtrado[i] < saldo_dolares_filtrado[i-1]:
                 vertical_offset = 10  # Ajustar posición para valores decrecientes
-            axs[1].annotate(f'{txt:.2f}', (meses_dolares[i], saldo_dolares_filtrado[i]), textcoords="offset points", xytext=(horizontal_offset, vertical_offset), ha='center')
+            axs[1].annotate(f'{txt:.2f}', (meses_dolares[i], saldo_dolares_filtrado[i]), 
+                            textcoords="offset points", xytext=(horizontal_offset, vertical_offset), 
+                            ha='center', color='white', bbox=dict(facecolor='black', alpha=0.7, edgecolor='none'))
 
-    # Gráfico de Cuotas a Vencer
-    meses_cuotas = [row[0] for row in cuotas]
-    valores_cuotas = [row[1] for row in cuotas]
+    # Gráfico de Cuotas a Vencer del Mes Más Reciente
+    if cuotas_recientes:
+        axs[2].bar(meses_cuotas_recientes, cuotas_recientes, label='Cuotas a Vencer')
+        axs[2].set_ylim(top=max(cuotas_recientes) * 1.2)  # Ajustar la escala de las barras para dar espacio a las anotaciones
+        axs[2].set_title(f'Cuotas a vencer de la factura ({mes_factura_reciente})')
+        axs[2].set_xlabel('Mes')
+        axs[2].set_ylabel('Monto')
+        axs[2].legend()
 
-    axs[2].bar(meses_cuotas, valores_cuotas, label='Cuotas a Vencer')
-    axs[2].set_ylim(top=max(valores_cuotas) * 1.2)  # Ajustar la escala de las barras para dar espacio a las anotaciones
-    axs[2].set_title('Cuotas a Vencer')
-    axs[2].set_xlabel('Mes')
-    axs[2].set_ylabel('Cuota')
-    axs[2].legend()
-
-    for i, txt in enumerate(valores_cuotas):
-        vertical_offset = 10  # Colocar la anotación ligeramente por encima de la barra
-        axs[2].annotate(f'{txt:.2f}', (meses_cuotas[i], valores_cuotas[i]), textcoords="offset points", xytext=(0, vertical_offset), ha='center')
+        for i, txt in enumerate(cuotas_recientes):
+            vertical_offset = 10  # Colocar la anotación ligeramente por encima de la barra
+            axs[2].annotate(f'{txt:.2f}', (meses_cuotas_recientes[i], txt), 
+                            textcoords="offset points", xytext=(0, vertical_offset), 
+                            ha='center', color='white', bbox=dict(facecolor='black', alpha=0.7, edgecolor='none'))
 
     if save_path:
         plt.savefig(save_path)
     plt.show()
 
 
-
+# Obtener facturas de la carpeta
 def get_files_in_folder(folder_path):
     files = []
     for root, dirs, filenames in os.walk(folder_path):
@@ -277,6 +298,7 @@ def get_files_in_folder(folder_path):
     return files
 
 
+# Procesar cada factura
 def process_pdfs_in_folder(folder_path):
     pdf_files = get_files_in_folder(folder_path)
     conn = sqlite3.connect('invoices.db')
@@ -314,9 +336,6 @@ if __name__ == '__main__':
     
     # Generar gráficos a partir de los datos
     plot_data(save_path=save_path)
-
-
-
 
 
 
